@@ -1,0 +1,94 @@
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+  <head>
+	<style type="text/css">
+  		body {
+			margin: 0px;
+			padding: 0px;
+			background-color: #ffffff;
+			overflow-y: hidden;
+			?max-width: 100%;
+		}
+		body, td, input, select, textarea, button {
+			color: hsl(216, 30%, 30%);
+			font: menu;
+			?font-family: Verdana, sans-serif;
+			font-size: 9pt;
+		}
+		body:hover {
+			text-decoration: underline;
+		}
+		#title {
+			font-weight: bold;
+			background: 
+			-webkit-gradient(linear, right bottom, right top, color-stop(0.55, #fcffff), color-stop(1, #ffffff));
+			-webkit-box-shadow: 0px 1px 1px hsl(215, 20%, 86%);
+		}
+		#from {
+		}
+
+	</style>
+	<script type="text/javascript">
+      var msg_id = '';
+	  function $() {
+		  return document.getElementById.apply(document, arguments);
+	  }
+
+	  function init() {
+
+		  var params = getParams();
+		  $('title').innerHTML = params['title'] || "";
+		  $('from').innerHTML = params['from'] || "";
+		  $('preview').innerHTML = params['preview'] || "";
+		  msg_id = params['msg_id'] || "";
+          folderId = params['folderId'] || "";
+          folderName = params['folderName'] || "";
+	  }
+	  
+	  function getParams() {
+		var q = document.location.search || "";
+		if (q.indexOf("?") == 0)
+			q = q.substring(1);
+		
+		var tokens = q.split("&");
+		
+		var params = [];
+		for (var i in tokens) {
+			var kv = tokens[i].split("=");
+			params[kv[0]] = decodeURIComponent(kv[1]);
+		}			
+		return params;
+  	  }
+
+	  function openmail() {
+		  chrome.extension.getBackgroundPage().goToHanmailView(msg_id, folderId, folderName);
+		  close();
+	  }
+	  
+	  function setUnderLine(id, isOn) {
+		  if(isOn)
+			  $(id).style.textDecoration = 'underline';
+		  else 
+			  $(id).style.textDecoration = 'none';
+	  }
+	  </script>
+  </head>
+  <body onload="init()" >
+	<table>
+	  <tr>
+		<td id="title" onMouseOver="setUnderLine('title', true)" onMouseOut="setUnderLine('title', false)" onclick="openmail()"></td>
+	  </tr>
+	  <tr>
+		<td>
+		  <span>From: </span>
+		  <span id="from"></span>
+		</td>
+	  </tr>
+	  <tr>
+		<td id="body">
+		  <div id="preview" onMouseOver="setUnderLine('preview', true)" onMouseOut="setUnderLine('preview', false)" onclick="openmail()">
+		  </div>
+		</td>
+	  </tr>
+	</table>
+  </body>
+</html>

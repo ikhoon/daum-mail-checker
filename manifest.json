@@ -1,0 +1,17 @@
+{
+  "background_page": "background.html",
+  "browser_action": {
+    "default_title": ""
+  },
+  "default_locale": "en",
+  "description": "__MSG_hanmailcheck_description__",
+  "icons": {
+    "128": "icon_128.png"
+  },
+  "name": "__MSG_hanmailcheck_name__",
+  "options_page": "options.html",
+  "permissions": [
+    "tabs", "notifications", "http://*.daum.net/*", "https://*.daum.net/*"
+   ],
+  "version": "1.1.1"
+}

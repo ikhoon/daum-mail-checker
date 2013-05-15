@@ -1,0 +1,549 @@
+<html>
+<head>
+<script>
+var animationFrames = 36;
+var animationSpeed = 5; // ms
+var canvas;
+var canvasContext;
+var loggedInImage;
+var pollIntervalMin = 1000 * 60;  // 1 minute
+var pollIntervalMax = 1000 * 60 * 60 * 2;  // 2 hour
+var requestFailureCount = 0;  // used for exponential backoff
+var requestTimeout = 1000 * 2;  // 5 seconds
+var rotation = 0;
+var scaleFactor = 1;
+var toSmall = true;
+var unreadCount = -1;
+var loadingAnimation = new LoadingAnimation();
+var isLogin = false;
+var isOtherUserLogin = false;
+
+function loginError(code) {
+    var msg = '';
+    if(code == 'LOGIN_FAIL') {
+        msg = 'Loggin fail, please check user id or password.';
+    }
+    else if(code == 'NOT_OK') {
+        msg = 'Internal Server Error or Service Unavailable, please try later.';
+    }
+    else if(code == 'OTHER_LOGIN'){
+        msg = 'You logged another daum id, please reloggin your daum id.';
+    }
+	var params = {
+		title : 'Loggin Error',
+		from : 'Daum mailchecker',
+		preview : msg,
+        msg_id :  code
+	}
+	notification_show(params); 
+}
+
+function login(onSuccess, onError) {
+	var xhr = new XMLHttpRequest();
+	var url = "https://logins.daum.net/accounts/login.do?slogin=1";
+	
+	var id = localStorage.daumid || "";
+	var pw = localStorage.daumpw || "";
+	
+    if(id == "" || pw == "") {
+        onError();
+        return;
+    }
+	var params = "id=" + id + "&pw=" + pw + "&url=http://www.daum.net&securityLevel=2";
+
+	xhr.onreadystatechange = function() {
+		if(xhr.readyState == 4 && xhr.status == 200) {
+            if((xhr.getResponseHeader('X-DaumLogin-Daumid') == id) && (xhr.getResponseHeader('X-DaumLogin-Error') == '200 OK')) {
+                onSuccess();
+                isLogin = true;
+            }
+            else if((xhr.getResponseHeader('X-DaumLogin-Daumid') != id) && (xhr.getResponseHeader('X-DaumLogin-Error') == '200 OK')) {
+                loginError('OTHER_LOGIN');
+            }
+            else if((xhr.getResponseHeader('X-DaumLogin-Daumid') == id) && (xhr.getResponseHeader('X-DaumLogin-Error') != '200 OK')) {
+                loginError('LOGIN_FAIL');
+            }
+            else {
+                onError();
+            }
+        }
+    }
+
+	xhr.open("POST", url, true);
+	xhr.send(params);
+	return id;
+}
+
+
+function initHanmail() {
+	
+    var onSuccess = function() {
+        getHanmailInboxCount(
+	    	function(count) {
+	    		loadingAnimation.stop();
+	    		updateUnreadCount(count);
+	    		scheduleRequest();
+	    	},
+	    	function() {
+	    		loadingAnimation.stop();
+	    		showLoggedOut();
+	    		scheduleRequest();
+            }
+        );
+    };
+
+    var onError = function() {
+		loadingAnimation.stop();
+		showLoggedOut();
+    }
+
+    if(isLogin == false) {
+        login(onSuccess, onError);
+    }
+    else {
+        onSuccess();
+    }
+}
+
+function getHanmailUrl() {
+	var url = "http://mail2.daum.net/hanmailex/Top.daum";
+	return url;
+}
+
+function getHanmailMobileUrl() {
+	var url = "http://mail2.daum.net/hanmailex/mobile/basic/Top.daum";
+	return url;
+}
+
+function getPreviewUrl() {
+	var url = "http://mail2.daum.net/hanmailex/js/ajax/call/plaincall/MailViewService.getMailTextSummary.dwr";
+	return url;
+}
+
+function isHanmailUrl(url) {
+	// This is the Gmail we're looking for if:
+	// - starts with the correct gmail url
+	// - doesn't contain any other path chars
+	var hanmail = getHanmailUrl();
+	if (url.indexOf(hanmail) != 0)
+		return false;
+
+	return url.length == hanmail.length || url[hanmail.length] == '?' ||
+        url[hanmail.length] == '#';
+}
+
+// A "loading" animation displayed while we wait for the first response from
+// Gmail. This animates the badge text with a dot that cycles from left to
+// right.
+function LoadingAnimation() {
+	this.timerId_ = 0;
+	this.maxCount_ = 8;  // Total number of states in animation
+	this.current_ = 0;  // Current state
+	this.maxDot_ = 4;  // Max number of dots in animation
+}
+
+LoadingAnimation.prototype.paintFrame = function() {
+	var text = "";
+	for (var i = 0; i < this.maxDot_; i++) {
+		text += (i == this.current_) ? "." : " ";
+	}
+	if (this.current_ >= this.maxDot_)
+		text += "";
+
+	chrome.browserAction.setBadgeText({text:text});
+	this.current_++;
+	if (this.current_ == this.maxCount_)
+		this.current_ = 0;
+}
+
+LoadingAnimation.prototype.start = function() {
+	if (this.timerId_)
+		return;
+
+	var self = this;
+	this.timerId_ = window.setInterval(function() {
+		self.paintFrame();
+	}, 50);
+}
+
+LoadingAnimation.prototype.stop = function() {
+	if (!this.timerId_)
+		return;
+
+	window.clearInterval(this.timerId_);
+	this.timerId_ = 0;
+}
+
+
+chrome.tabs.onUpdated.addListener(function(tabId, changeInfo) {
+	if (changeInfo.url && isHanmailUrl(changeInfo.url)) {
+		getHanmailInboxCount(function(count) {
+			updateUnreadCount(count);
+		});
+	}
+});
+
+
+function init() {
+    isLogin = false;
+	canvas = document.getElementById('canvas');
+	loggedInImage = document.getElementById('logged_in');
+	canvasContext = canvas.getContext('2d');
+
+	chrome.browserAction.setBadgeBackgroundColor({color:[25, 25, 102, 15]});
+
+	chrome.browserAction.setIcon({path: "hanmail_logged_in.png"});
+	loadingAnimation.start();
+
+	startRequest();
+}
+
+function scheduleRequest() {
+	var randomness = Math.random() * 2;
+	var exponent = Math.pow(2, requestFailureCount);
+	var delay = Math.min(randomness * pollIntervalMin * exponent,
+						 pollIntervalMax);
+	delay = Math.round(delay);
+
+	window.setTimeout(startRequest, delay);
+}
+
+// ajax stuff
+function startRequest() {
+	initHanmail();
+}
+
+function getHanmailInboxCount(onSuccess, onError) {
+	var xhr = new XMLHttpRequest();
+	var abortTimerId = window.setTimeout(function() {
+		xhr.abort();  // synchronously calls onreadystatechange
+	}, requestTimeout);
+
+	function handleSuccess(count) {
+		requestFailureCount = 0;
+		window.clearTimeout(abortTimerId);
+		if (onSuccess)
+			onSuccess(count);
+	}
+
+	function handleError() {
+		++requestFailureCount;
+		window.clearTimeout(abortTimerId);
+		if (onError)
+			onError();
+	}
+
+	try {
+		xhr.onreadystatechange = function(){
+			if (xhr.readyState != 4)
+				return;
+
+			if (xhr.responseText) {
+				var count = getUnreadCount(xhr.responseText);
+				getNewMail(xhr.responseText);
+				if (count) {
+					handleSuccess(count);
+					return;
+				} else {
+					console.error(chrome.i18n.getMessage("hanmail_check_node_error"));
+				}
+			}
+
+			handleError();
+		}
+
+		xhr.onerror = function(error) {
+			handleError();
+		}
+
+		xhr.open("GET", getHanmailMobileUrl(), true);
+		xhr.setRequestHeader("Accept", "application/xml,application/xhtml+xml,text/html;q=0.9,text/plain;q=0.8,image/png,*/*;q=0.5");
+		xhr.send(null);
+	} catch(e) {
+		console.error(chrome.i18n.getMessage("hanmailcheck_exception", e));
+		handleError();
+	}
+}
+
+function extractPreview(content) {
+	var x = content.indexOf("\"");
+	var y = content.indexOf("\"", x + 1);
+	return content.slice(x, y + 1);
+}
+
+function getBody(content) {
+	test = content.toLowerCase();    // to eliminate case sensitivity
+	var x = test.indexOf("<body");
+	if(x == -1) return "";
+
+	x = test.indexOf(">", x);
+	if(x == -1) return "";
+
+	var y = test.lastIndexOf("</body>");
+	if(y == -1) y = test.lastIndexOf("</html>");
+	if(y == -1) y = content.length;    // If no HTML then just grab everything till end
+
+	return content.slice(x + 1, y);   
+};
+
+function getParams(q) {
+    if (q.indexOf("?") == 0) {
+		q = q.substring(1);
+    }
+    else if(q.indexOf("?") > 0){
+        q = q.substring(q.indexOf("?") + 1);
+    }
+	
+	var tokens = q.split("&");
+	
+	var params = [];
+	for (var i in tokens) {
+		var kv = tokens[i].split("=");
+		params[kv[0]] = decodeURIComponent(kv[1]);
+	}			
+	return params;
+}
+
+function getUnreadCount(content) {
+	var x  = content.indexOf("newCount");    // to eliminate case sensitivity
+	if(x == -1) return "";
+	x = content.indexOf(">(", x);
+	if(x == -1) return "";
+	var y = content.indexOf(")<", x);
+	if(y == -1) return "";
+	return content.slice(x + 2, y);   
+}
+
+function getNewMail(content) {
+	var body = document.createElement("div");
+	body.innerHTML = getBody(content);
+
+	var mails = body.getElementsByClassName("new");
+	var newest = "";
+	var stored_newest = localStorage.newest || "";
+	for (var i = 0, mail; mail = mails[i]; i++) {
+		var sender = mail.getElementsByClassName("mail_name")[0];
+		var header = mail.getElementsByClassName("mail_subject")[0];
+		var maildate = mail.getElementsByClassName("mail_date")[0];
+        var mail_link = mail.getElementsByClassName("mail_read_link")[0].getAttribute('href');
+        var mail_params = getParams(mail_link);
+        var mailId = mail_params['mailId'];
+
+		if(stored_newest == "" || mailId > stored_newest) {
+			var from = sender.innerHTML;
+			var title = header.innerHTML;
+			if(localStorage.noti == undefined || localStorage.noti == "true") {
+                getPreviewContents(mailId, from, title, mail_params['folderId'], mail_params['folderName']);
+			}
+			if(i == 0) {
+				localStorage.newest = mailId;
+			}
+		}
+	}
+}
+
+function getPreviewContents(id, from, title, folderId, folderName) {
+
+	var xhr = new XMLHttpRequest();
+
+	var url = getPreviewUrl();
+	var params = "callCount=1\n";
+	params += "page=/hanmailex/Top.daum\n";
+	params += "httpSessionId=7CAED5E0F38976DC3B8A378E0B5487DF\n";
+	params += "scriptSessionId=361D8A41157BE69CA42EEA39BA104BDA663\n";
+	params += "c0-scriptName=MailViewService\n";
+	params += "c0-methodName=getMailTextSummary\n";
+	params += "c0-id=0\n"
+	params += "c0-param0=string:" + id + "\n";
+	params += "batchId=12\n";
+	
+	xhr.onreadystatechange = function() {
+		if(xhr.readyState == 4 && xhr.status == 200) {
+			var preview = eval(extractPreview(xhr.responseText)) || "";
+			var params = {
+				title : title.cut(60),
+				from : from,
+				preview : preview.cut(145),
+                msg_id : id,
+                folderId : folderId,
+                folderName : folderName
+			}
+			notification_show(params); 
+		}
+	}
+	xhr.open("POST", url, true);
+	xhr.send(params);
+	return true;
+
+}
+
+// function gmailNSResolver(prefix) {
+// 	if(prefix == 'gmail') {
+// 		return 'http://purl.org/atom/ns#';
+// 	}
+// }
+
+function updateUnreadCount(count) {
+	if (unreadCount != count) {
+		unreadCount = count;
+		animateFlip();
+	}
+}
+
+
+function ease(x) {
+	return (1-Math.sin(Math.PI/2+x*Math.PI))/2;
+}
+
+function animateFlip() {
+
+	if (toSmall == true) {
+		scaleFactor -= 1/animationFrames;
+	}
+	else {
+		scaleFactor += 1/animationFrames;
+	}
+	drawIconAtRotation();
+
+	if (scaleFactor > 0 && scaleFactor < 1) {
+		setTimeout("animateFlip()", animationSpeed);
+	} 
+	else if (scaleFactor <= 0) {
+		toSmall = false;
+		setTimeout("animateFlip()", animationSpeed);
+	}
+	else if (scaleFactor >= 1){
+		toSmall = true;
+		scaleFactor = 1;
+		drawIconAtRotation();
+		chrome.browserAction.setBadgeText({
+			text: unreadCount != "0" ? unreadCount : ""
+		});
+		chrome.browserAction.setBadgeBackgroundColor({color:[25, 25, 102, 155]});
+	}
+}
+
+function showLoggedOut() {
+	unreadCount = -1;
+	chrome.browserAction.setIcon({path:"hanmail_not_logged_in.png"});
+	chrome.browserAction.setBadgeBackgroundColor({color:[190, 190, 190, 230]});
+	chrome.browserAction.setBadgeText({text:"?"});
+}
+
+function drawIconAtRotation() {
+	canvasContext.save();
+	canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+	canvasContext.translate(
+		Math.ceil(canvas.width/2),
+		Math.ceil(canvas.height/2));
+//	canvasContext.rotate(2*Math.PI*ease(rotation));
+	canvasContext.scale(scaleFactor,scaleFactor);
+	canvasContext.drawImage(loggedInImage,
+							-Math.ceil(canvas.width/2),
+							-Math.ceil(canvas.height/2));
+	canvasContext.restore();
+
+	chrome.browserAction.setIcon({imageData:canvasContext.getImageData(0, 0,
+																	   canvas.width,canvas.height)});
+}
+
+function getHanmailViewUrl(msg_id, folderId, folderName) {
+    var url = 'http://mail2.daum.net/hanmailex/Top.daum?COMMAND=view&MSGID=' + msg_id + '&folderName=' + folderName + '&folderId=' + folderId;
+    return url;
+}
+
+function goToHanmailInbox() {
+	chrome.tabs.getAllInWindow(undefined, function(tabs) {
+		for (var i = 0, tab; tab = tabs[i]; i++) {
+			if (tab.url && isHanmailUrl(tab.url)) {
+				chrome.tabs.update(tab.id, {selected: true});
+				return;
+			}
+		}
+		chrome.tabs.create({url: getHanmailUrl()});
+	});
+}
+
+function goToOptionPage() {
+    chrome.tabs.create({url: chrome.extension.getURL("notify.html")} );
+}
+
+function goToHanmailView(msg_id, folderId, folderName) {
+    if(msg_id == 'OTHER_LOGIN') {
+        goToOptionPage(); 
+    }
+    else {
+    	chrome.tabs.getAllInWindow(undefined, function(tabs) {
+    		for (var i = 0, tab; tab = tabs[i]; i++) {
+    			if (tab.url && isHanmailUrl(tab.url)) {
+    				chrome.tabs.update(tab.id, {selected: true, url: getHanmailViewUrl(msg_id, folderId, folderName)});
+    				return;
+    			}
+    		}
+    		chrome.tabs.create({url: getHanmailViewUrl(msg_id, folderId, folderName)});
+    	});
+    }
+}
+// Called when the user clicks on the browser action.
+chrome.browserAction.onClicked.addListener(function(tab) {
+	goToHanmailInbox();
+});
+
+
+// notification
+  /*
+    Displays a notification with the current time. Requires "notifications"
+    permission in the manifest file (or calling
+    "webkitNotifications.requestPermission" beforehand).
+  */
+
+function notification_init() {
+
+	// Conditionally initialize the options.
+	if (!localStorage.isInitialized) {
+		localStorage.isActivated = true;   // The display activation.
+		localStorage.frequency = 1;        // The display frequency, in minutes.
+		localStorage.isInitialized = true; // The option initialization.
+	}
+}
+
+function getNofiticationUrl(params) {
+	var uri = "";
+	for (i in params) {
+		var value = params[i] || "";
+		uri += i + "=" + encodeURIComponent(value) + "&";
+	}
+	return chrome.extension.getURL("notify.html") + "?" + uri;
+}
+
+function notification_show(params) {
+  // Test for notification support.
+  if (webkitNotifications) {
+	var url = getNofiticationUrl(params);
+    var notification = webkitNotifications.createHTMLNotification(url);
+    notification.show();
+    setInterval(function() { notification.cancel(); }, 30000);
+  } else {
+    // Show a new tab with an error message.
+    chrome.tabs.create({url: 'error.html'});
+  }
+}
+
+String.prototype.cut = function(len) {
+         var str = this;
+         var l = 0;
+         for (var i=0; i<str.length; i++) {
+                 l += (str.charCodeAt(i) > 128) ? 2 : 1;
+                 if (l > len) return str.substring(0,i) + "...";
+         }
+         return str;
+}
+
+</script>
+	</head>
+	<body onload="init()">
+	<img id="logged_in" src="hanmail_logged_in.png">
+	<canvas id="canvas" width="19" height="19">
+	</body>
+	</html>
+
